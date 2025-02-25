@@ -7,7 +7,7 @@ import tempfile
 import glob
 import logging
 from typing import Sequence, Mapping, Any, Union
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from io import BytesIO
 
 # 로깅 설정
@@ -96,6 +96,8 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
     from nodes import NODE_CLASS_MAPPINGS
 
     video_name_without_ext = os.path.splitext(video_name)[0]
+    output_dir = os.path.join(os.getcwd(), "output")
+    os.makedirs(output_dir, exist_ok=True)
     
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
@@ -183,25 +185,32 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                     if not os.path.exists(result_path):
                         raise FileNotFoundError(f"Output file not found at: {result_path}")
 
+                    # 결과 파일 영구 저장 (선택 사항)
+                    permanent_output_path = os.path.join(output_dir, f"{output_filename}.mp4")
+                    with open(result_path, "rb") as src, open(permanent_output_path, "wb") as dst:
+                        dst.write(src.read())
+
                     with open(result_path, "rb") as f:
                         output_data = f.read()
 
                     logger.info("Successfully processed video")
                     
                     return {
+                        "success": True,
                         "output": {
                             "video_data": base64.b64encode(output_data).decode('utf-8'),
-                            "video_name": f"{output_filename}.mp4"
+                            "video_name": f"{output_filename}.mp4",
+                            "file_path": permanent_output_path
                         }
                     }
 
             except Exception as e:
                 logger.error(f"Error during LatentSync processing: {str(e)}")
-                return {"error": str(e)}
+                return {"success": False, "error": str(e)}
 
         except Exception as e:
             logger.error(f"Error in file handling: {str(e)}")
-            return {"error": str(e)}
+            return {"success": False, "error": str(e)}
 
         finally:
             # 임시 파일 정리
@@ -223,29 +232,43 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                     logger.error(f"Error processing pattern {pattern}: {str(e)}")
 
 
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": "LatentSync API",
+        "status": "running",
+        "usage": {
+            "endpoint": "/latentsync",
+            "method": "POST",
+            "required_fields": ["video", "audio", "video_name"],
+            "optional_fields": ["custom_width", "custom_height"]
+        }
+    })
+
+
 @app.route('/latentsync', methods=['POST'])
 def handle_latentsync():
     try:
         # API 요청에서 데이터 추출
         if not request.is_json:
-            return jsonify({"error": "Request must be JSON"}), 400
+            return jsonify({"success": False, "error": "Request must be JSON"}), 400
         
         data = request.json
         
         # 필수 필드 검증
         if 'video' not in data or 'audio' not in data or 'video_name' not in data:
-            return jsonify({"error": "Missing required fields (video, audio, video_name)"}), 400
+            return jsonify({"success": False, "error": "Missing required fields (video, audio, video_name)"}), 400
         
         # 선택적 필드 설정
-        custom_width = data.get('custom_width', 64)
-        custom_height = data.get('custom_height', 64)
+        custom_width = int(data.get('custom_width', 64))
+        custom_height = int(data.get('custom_height', 64))
         
         # 데이터 디코딩
         try:
             video_data = base64.b64decode(data['video'])
             audio_data = base64.b64decode(data['audio'])
         except:
-            return jsonify({"error": "Invalid base64 encoding"}), 400
+            return jsonify({"success": False, "error": "Invalid base64 encoding"}), 400
         
         # 처리
         result = process_latentsync(
@@ -257,33 +280,30 @@ def handle_latentsync():
         )
         
         # 에러 처리
-        if 'error' in result:
-            return jsonify({"error": result['error']}), 500
+        if not result.get('success', True):
+            return jsonify(result), 500
         
         return jsonify(result), 200
         
     except Exception as e:
         logger.error(f"Error in API handler: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        # 추가적인 cleanup
-        cleanup_patterns = [
-            os.path.join(os.getcwd(), "*.wav"),
-            os.path.join(os.getcwd(), "output", "*.mp4"),
-            os.path.join(os.getcwd(), "output", "*.wav")
-        ]
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    """파일 다운로드 엔드포인트"""
+    try:
+        output_dir = os.path.join(os.getcwd(), "output")
+        file_path = os.path.join(output_dir, filename)
         
-        for pattern in cleanup_patterns:
-            try:
-                files = glob.glob(pattern)
-                for file in files:
-                    try:
-                        os.remove(file)
-                        logger.info(f"Removed: {file}")
-                    except Exception as e:
-                        logger.error(f"Error removing {file}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Error processing pattern {pattern}: {str(e)}")
+        if not os.path.exists(file_path):
+            return jsonify({"success": False, "error": "File not found"}), 404
+            
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        logger.error(f"Error in download handler: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
@@ -297,5 +317,5 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(os.getcwd(), "temp"), exist_ok=True)
     
     # 서버 실행
-    logger.info("Starting Flask server...")
+    logger.info("Starting Flask server on port 5000...")
     app.run(host='0.0.0.0', port=5000)

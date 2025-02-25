@@ -11,22 +11,54 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
     libxext6 \
+    wget \
+    curl \
+    vim \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
+# SSH 서버 설정
+RUN mkdir -p /var/run/sshd
+RUN echo 'root:password' | chpasswd
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
 WORKDIR /workspace
+RUN git clone https://github.com/KKami91/LatentSync_VastAI.git && mv LatentSync_VastAI ComfyUI
 
-# 전체 프로젝트 복사 (ComfyUI 포함)
-COPY . /workspace
-
-# requirements.txt 기반 의존성 설치
+WORKDIR /workspace/ComfyUI
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Huggingface CLI 설치 및 모델 다운로드
-RUN pip3 install --upgrade huggingface-hub
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    huggingface-cli download ByteDance/LatentSync \
-    --local-dir custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints \
-    --exclude "*.git*" "README.md" || echo "Hugging Face 모델 다운로드 실패: 캐시 문제, 네트워크 문제 또는 모델 이름 확인 필요"
+WORKDIR /workspace/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# runpod serverless 실행을 위한 진입점 설정
-CMD ["python3", "LatentSync_basic.py"]
+WORKDIR /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 필요한 추가 패키지 설치
+WORKDIR /workspace/ComfyUI
+RUN pip3 install flask gunicorn
+
+RUN pip3 install --upgrade huggingface-hub
+WORKDIR /workspace/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper
+RUN huggingface-cli download ByteDance/LatentSync \
+    --local-dir checkpoints --exclude "*.git" "README.md" || echo "Huggingface 모델 다운로드 실패"
+
+COPY LatentSync_api.py /workspace/
+
+RUN mkdir -p /workspace/output /workspace/temp
+RUN chmod -R 777 /workspace
+
+EXPOSE 22 8188 5000
+
+# 시작 스크립트 생성
+RUN echo '#!/bin/bash\n\
+service ssh start\n\
+cd /workspace/ComfyUI\n\
+python -m main --listen 0.0.0.0 --port 8188 --disable-auto-launch &\n\
+cd /workspace\n\
+python LatentSync_api.py &\n\
+tail -f /dev/null' > /workspace/start.sh
+
+RUN chmod +x /workspace/start.sh
+
+ENTRYPOINT ["/workspace/start.sh"]

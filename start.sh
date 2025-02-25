@@ -5,7 +5,7 @@ service ssh start
 
 # LatentSync API 서버 시작 (이것이 핵심 서비스)
 cd /workspace
-python LatentSync_api.py &
+python3 LatentSync_api.py &
 
 # 컨테이너 유지
 tail -f /dev/null

@@ -17,10 +17,16 @@ RUN apt-get update && apt-get install -y \
     openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
+# 작업 디렉토리 명시적 생성
+RUN mkdir -p /workspace
+
 # SSH 서버 설정
 RUN mkdir -p /var/run/sshd
 RUN echo 'root:password' | chpasswd
 RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+# SSH 로그인 시 작업 디렉토리로 자동 이동
+RUN echo 'cd /workspace' >> /root/.bashrc
 
 WORKDIR /workspace
 RUN git clone https://github.com/KKami91/LatentSync_VastAI.git && mv LatentSync_VastAI ComfyUI

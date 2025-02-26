@@ -290,31 +290,55 @@ class LipsyncPipeline(DiffusionPipeline):
         return original_mel[:, start_idx:end_idx].unsqueeze(0)
 
     def affine_transform_video(self, video_path):
+        """비디오 프레임에서 얼굴을 감지하고 변환하는 함수
+        
+        Args:
+            video_path (str): 비디오 파일 경로
+            
+        Returns:
+            tuple: 감지된 얼굴, 원본 비디오 프레임, 얼굴 위치 박스, 변환 행렬, 얼굴이 감지된 프레임 인덱스
+            
+        Raises:
+            ValueError: 비디오의 모든 프레임에서 얼굴이 감지되지 않은 경우
+        """
+        # 비디오 프레임 읽기
         video_frames = read_video(video_path, use_decord=False)
         faces = []
         boxes = []
         affine_matrices = []
-        print(f"Affine transforming {len(video_frames)} faces...")
+        frame_indices = []  # 얼굴이 감지된 프레임의 인덱스를 저장
         
-        face_detected = False
-        for frame in tqdm.tqdm(video_frames):
+        print(f"전체 {len(video_frames)}개 프레임에 대해 얼굴 변환 처리 중...")
+        
+        for i, frame in enumerate(tqdm.tqdm(video_frames)):
             try:
+                # 프레임에서 얼굴 감지 시도
                 face, box, affine_matrix = self.image_processor.affine_transform(frame)
-                faces.append(face)
-                boxes.append(box)
-                affine_matrices.append(affine_matrix)
-                face_detected = True
+                
+                # 얼굴이 올바르게 감지되었는지 명시적으로 확인
+                if face is not None and isinstance(face, torch.Tensor):
+                    faces.append(face)
+                    boxes.append(box)
+                    affine_matrices.append(affine_matrix)
+                    frame_indices.append(i)  # 얼굴이 감지된 프레임 인덱스 저장
             except Exception as e:
+                print(f"프레임 {i}에서 예외 발생: {str(e)}")
                 if "No face detected" in str(e):
+                    # 얼굴이 없는 프레임은 건너뜀
                     continue
                 else:
+                    # 다른 오류는 그대로 발생시킴
                     raise e
         
-        if not face_detected:
-            raise ValueError("No face detected in any frame of the video. Please use a video with visible faces.")
+        if not faces:
+            # 모든 프레임에서 얼굴이 감지되지 않은 경우
+            raise ValueError("비디오의 모든 프레임에서 얼굴이 감지되지 않았습니다. 얼굴이 보이는 비디오를 사용해주세요.")
         
+        # 감지된 얼굴만 처리
         faces = torch.stack(faces)
-        return faces, video_frames, boxes, affine_matrices
+        
+        # 얼굴이 감지된 프레임, 관련 메타데이터와 함께 반환
+        return faces, video_frames, boxes, affine_matrices, frame_indices
 
     def restore_video(self, faces, video_frames, boxes, affine_matrices):
         video_frames = video_frames[: faces.shape[0]]
@@ -353,95 +377,117 @@ class LipsyncPipeline(DiffusionPipeline):
         callback_steps: Optional[int] = 1,
         **kwargs,
     ):
+        """입력 비디오와 오디오를 사용하여 립싱크 처리를 수행합니다.
+        
+        Args:
+            video_path: 입력 비디오 파일 경로
+            audio_path: 입력 오디오 파일 경로
+            video_out_path: 출력 비디오가 저장될 경로
+            num_frames: 한 번에 처리할 프레임 수
+            video_fps: 비디오 프레임 레이트
+            기타 매개변수: 모델 추론 관련 설정들
+            
+        Returns:
+            None: 결과는 video_out_path에 저장됩니다.
+        """
+        # 모델 평가 모드 설정
         is_train = self.unet.training
         self.unet.eval()
 
-        # 0. Define call parameters
+        # 0. 기본 매개변수 정의
         batch_size = 1
         device = self._execution_device
         self.image_processor = ImageProcessor(height, mask=mask, device="cuda")
-        self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
+        self.set_progress_bar_config(desc=f"샘플 프레임: {num_frames}")
 
-        video_frames, original_video_frames, boxes, affine_matrices = self.affine_transform_video(video_path)
+        # 얼굴 감지 및 변환 수행
+        video_frames, original_video_frames, boxes, affine_matrices, frame_indices = self.affine_transform_video(video_path)
         audio_samples = read_audio(audio_path)
 
-        # 1. Default height and width to unet
+        # 1. UNet에 기본 높이와 너비 설정
         if self.latent_space:
             height = height or self.unet.config.sample_size * self.vae_scale_factor
             width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        # 2. Check inputs
+        # 2. 입력 검증
         self.check_inputs(height, width, callback_steps)
 
-        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-        # corresponds to doing no classifier free guidance.
+        # 가이드 스케일 설정 (Imagen 논문의 식 (2)의 가이드 가중치 'w'와 유사하게 정의)
+        # guidance_scale = 1은 classifier free guidance를 사용하지 않는 것을 의미
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        # 3. set timesteps
+        # 3. 타임스텝 설정
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 4. Prepare extra step kwargs.
+        # 4. 추가 스텝 매개변수 준비
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         self.video_fps = video_fps
 
+        # 오디오 관련 설정
         if self.unet.add_audio_layer:
             whisper_feature = self.audio_encoder.audio2feat(audio_path)
             whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
-            num_inferences = min(len(video_frames), len(whisper_chunks)) // num_frames
-        else:
-            num_inferences = len(video_frames) // num_frames
+        # 얼굴이 감지된 프레임들을 num_frames 크기의 청크로 나누기
+        frame_chunks = []
+        for i in range(0, len(frame_indices), num_frames):
+            chunk = frame_indices[i:i+num_frames]
+            if len(chunk) == num_frames:  # 완전한 청크만 처리
+                frame_chunks.append(chunk)
 
-        synced_video_frames = []
-        masked_video_frames = []
+        num_inferences = len(frame_chunks)
+        print(f"얼굴이 감지된 {num_inferences}개의 프레임 청크 처리 중")
 
-        save_affine_faces = False
-        if save_affine_faces:
-            pixel_values_faces = []
-            masked_pixel_values_faces = []
-
-        # Prepare latent variables
+        # 최종 결과 비디오를 위한 프레임 배열 초기화 (원본 비디오 프레임으로)
+        final_frames = np.array(original_video_frames)
+        
+        # 잠재 변수 준비
         if self.latent_space:
             num_channels_latents = self.vae.config.latent_channels
         else:
             num_channels_latents = 3
 
-        all_latents = self.prepare_latents(
-            batch_size,
-            num_frames * num_inferences,
-            num_channels_latents,
-            height,
-            width,
-            weight_dtype,
-            device,
-            generator,
-        )
+        # 각 청크 처리
+        for chunk_idx, chunk in enumerate(tqdm.tqdm(frame_chunks, desc="얼굴 청크 처리 중")):
+            # 현재 청크의 프레임들 가져오기
+            chunk_frames = [video_frames[frame_indices.index(idx)] for idx in chunk]
+            chunk_frames_tensor = torch.stack(chunk_frames)
+            
+            # 현재 청크의 박스와 변환 행렬 가져오기
+            chunk_boxes = [boxes[frame_indices.index(idx)] for idx in chunk]
+            chunk_affine_matrices = [affine_matrices[frame_indices.index(idx)] for idx in chunk]
+            
+            # 현재 청크에 대한 latent 준비
+            latents = self.prepare_latents(
+                batch_size,
+                num_frames,
+                num_channels_latents,
+                height,
+                width,
+                weight_dtype,
+                device,
+                generator,
+            )
 
-        for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+            # 오디오 특성 준비
             if self.unet.add_audio_layer:
-                # mel_overlap = torch.stack(mel_overlap_list[i * num_frames : (i + 1) * num_frames])
-                # mel_overlap = mel_overlap.unsqueeze(0).to(device, dtype=weight_dtype)
-                mel_overlap = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
+                # 현재 청크에 해당하는 오디오 특성 가져오기
+                mel_overlap = torch.stack([whisper_chunks[idx] for idx in chunk])
                 mel_overlap = mel_overlap.to(device, dtype=weight_dtype)
                 if do_classifier_free_guidance:
                     empty_mel_overlap = torch.zeros_like(mel_overlap)
                     mel_overlap = torch.cat([empty_mel_overlap, mel_overlap])
             else:
                 mel_overlap = None
-            inference_video_frames = video_frames[i * num_frames : (i + 1) * num_frames]
-            latents = all_latents[:, :, i * num_frames : (i + 1) * num_frames]
+
+            # 마스크 및 마스크된 이미지 준비
             pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
-                inference_video_frames, affine_transform=False
+                chunk_frames_tensor, affine_transform=False
             )
 
-            if save_affine_faces:
-                pixel_values_faces.append(pixel_values)
-                masked_pixel_values_faces.append(masked_pixel_values)
-
-            # 7. Prepare mask latent variables
+            # 7. 마스크 잠재 변수 준비
             mask_latents, masked_image_latents = self.prepare_mask_latents(
                 masks,
                 masked_pixel_values,
@@ -453,7 +499,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 do_classifier_free_guidance,
             )
 
-            # 8. Prepare image latents
+            # 8. 이미지 잠재 변수 준비
             image_latents = self.prepare_image_latents(
                 pixel_values,
                 device,
@@ -462,26 +508,26 @@ class LipsyncPipeline(DiffusionPipeline):
                 do_classifier_free_guidance,
             )
 
-            # 9. Denoising loop
+            # 9. 디노이징 루프
             num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for j, t in enumerate(timesteps):
-                    # expand the latents if we are doing classifier free guidance
+                    # classifier free guidance를 사용하는 경우 latent 확장
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
-                    # concat latents, mask, masked_image_latents in the channel dimension
+                    # latent, 마스크, 마스크된 이미지 latent를 채널 차원에서 결합
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                     latent_model_input = torch.cat(
                         [latent_model_input, mask_latents, masked_image_latents, image_latents], dim=1
                     )
 
-                    # predict the noise residual
+                    # 노이즈 잔차 예측
                     noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=mel_overlap).sample
 
-                    # compute the previous noisy sample x_t -> x_t-1
+                    # 이전의 노이즈 샘플 계산 x_t -> x_t-1
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-                    # call the callback, if provided
+                    # 콜백 호출 (제공된 경우)
                     if j == len(timesteps) - 1 or (
                         (j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0
                     ):
@@ -489,46 +535,61 @@ class LipsyncPipeline(DiffusionPipeline):
                         if callback is not None and j % callback_steps == 0:
                             callback(j, t, latents)
 
-            # Recover the pixel values
+            # 픽셀 값 복원
             decoded_latents = self.decode_latents(latents)
             decoded_latents = self.recover_original_pixel_values(
                 decoded_latents, pixel_values, 1 - masks, device, weight_dtype
             )
-            synced_video_frames.append(decoded_latents)
-            masked_video_frames.append(masked_pixel_values)
+            
+            # 처리된 얼굴 프레임 획득
+            processed_faces = decoded_latents
+            
+            # 원본 비디오에 처리된 얼굴 적용
+            for i, frame_idx in enumerate(chunk):
+                try:
+                    face = processed_faces[i]
+                    x1, y1, x2, y2 = chunk_boxes[i]
+                    height_box = int(y2 - y1)
+                    width_box = int(x2 - x1)
+                    
+                    # 얼굴 크기 조정
+                    face = torchvision.transforms.functional.resize(face, size=(height_box, width_box), antialias=True)
+                    face = rearrange(face, "c h w -> h w c")
+                    face = (face / 2 + 0.5).clamp(0, 1)
+                    face = (face * 255).to(torch.uint8).cpu().numpy()
+                    
+                    # 원본 프레임에 처리된 얼굴 적용
+                    restored_frame = self.image_processor.restorer.restore_img(
+                        original_video_frames[frame_idx], 
+                        face, 
+                        chunk_affine_matrices[i]
+                    )
+                    
+                    # 최종 결과 비디오 프레임 업데이트
+                    final_frames[frame_idx] = restored_frame
+                except Exception as e:
+                    print(f"프레임 {frame_idx} 처리 중 오류 발생: {str(e)}")
+                    # 오류 발생 시 원본 프레임 유지
+                    continue
 
-        synced_video_frames = self.restore_video(
-            torch.cat(synced_video_frames), original_video_frames, boxes, affine_matrices
-        )
-        masked_video_frames = self.restore_video(
-            torch.cat(masked_video_frames), original_video_frames, boxes, affine_matrices
-        )
-
-        audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
+        # 오디오 길이에 맞게 비디오 길이 조정
+        audio_samples_remain_length = int(len(final_frames) / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
 
+        # 훈련 모드 복원
         if is_train:
             self.unet.train()
 
+        # 임시 디렉토리 준비
         temp_dir = "temp"
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
-        if save_affine_faces:
-            pixel_values_faces = torch.cat(pixel_values_faces)
-            masked_pixel_values_faces = torch.cat(masked_pixel_values_faces)
-
-            pixel_values_faces = self.pixel_values_to_images(pixel_values_faces)
-            masked_pixel_values_faces = self.pixel_values_to_images(masked_pixel_values_faces)
-
-            write_video("affine_faces.mp4", pixel_values_faces, fps=25)
-            write_video("masked_affine_faces.mp4", masked_pixel_values_faces, fps=25)
-
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=25)
-        # write_video(video_mask_path, masked_video_frames, fps=25)
-
+        # 최종 비디오 저장
+        write_video(os.path.join(temp_dir, "video.mp4"), final_frames, fps=25)
         sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
+        # 비디오와 오디오 결합
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)

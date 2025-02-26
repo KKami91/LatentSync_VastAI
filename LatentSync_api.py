@@ -115,7 +115,7 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
             with open(audio_path, "wb") as f:
                 f.write(audio_data)
 
-            logger.info("Starting LatentSync processing...")
+            logger.info("LatentSync 처리 시작...")
             
             try:
                 with torch.inference_mode():
@@ -151,13 +151,14 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
 
                     try:
                         # LatentSync 처리 시도
+                        logger.info("LatentSync 처리 시도 중...")
                         d_latentsyncnode_43 = d_latentsyncnode.inference(
                             seed=random.randint(1, 2**32 - 1),
                             images=get_value_at_index(d_videolengthadjuster_53, 0),
                             audio=get_value_at_index(d_videolengthadjuster_53, 1),
                         )
                         
-                        logger.info(f"Processing video combine with filename: {output_filename}")
+                        logger.info(f"처리 성공, 파일명으로 비디오 생성 중: {output_filename}")
                         
                         result = vhs_videocombine.combine_video(
                             frame_rate=25,
@@ -174,12 +175,29 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                             audio=get_value_at_index(d_latentsyncnode_43, 1),
                             unique_id=7599875590960303900,
                         )
-                    except Exception as e:
-                        # 얼굴 감지 실패 또는 기타 오류 발생 시 원본 영상에 음성만 추가
-                        logger.warning(f"LatentSync 처리 중 오류 발생: {str(e)}")
-                        logger.info("얼굴 감지 실패 또는 오류 발생. 원본 영상에 음성만 추가합니다.")
                         
+                    except Exception as e:
+                        # 특정 얼굴 감지 오류에 대한 개선된 오류 처리
+                        error_msg = str(e)
+                        logger.warning(f"LatentSync 처리 오류: {error_msg}")
+
+                        # 얼굴 감지 관련 오류인지 확인
+                        face_detection_error = any(phrase in error_msg for phrase in [
+                            "No face detected", 
+                            "expected Tensor", 
+                            "얼굴 감지 실패", 
+                            "얼굴을 찾을 수 없습니다",
+                            "but got NoneType"
+                        ])
+                        
+                        # 특정 얼굴 감지 오류 확인
+                        if face_detection_error:
+                            logger.info("얼굴 감지 관련 오류 발생: 원본 비디오에 오디오만 추가합니다")
+                        else:
+                            logger.warning(f"기타 오류 발생: {error_msg}")
+                            
                         # 원본 영상과 음성 결합
+                        logger.info("대체 처리: 원본 비디오에 오디오만 추가합니다")
                         result = vhs_videocombine.combine_video(
                             frame_rate=25,
                             loop_count=0,
@@ -203,13 +221,13 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                         saved_files = result[0][1]
 
                     if not saved_files:
-                        raise Exception("No output files were generated")
+                        raise Exception("출력 파일이 생성되지 않았습니다")
 
                     result_path = saved_files[-1]  # 마지막 파일이 최종 결과물
-                    logger.info(f"Result file path: {result_path}")
+                    logger.info(f"결과 파일 경로: {result_path}")
 
                     if not os.path.exists(result_path):
-                        raise FileNotFoundError(f"Output file not found at: {result_path}")
+                        raise FileNotFoundError(f"다음 경로에서 출력 파일을 찾을 수 없습니다: {result_path}")
 
                     # 결과 파일 영구 저장 (선택 사항)
                     permanent_output_path = os.path.join(output_dir, f"{output_filename}.mp4")
@@ -219,7 +237,7 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                     with open(result_path, "rb") as f:
                         output_data = f.read()
 
-                    logger.info("Successfully processed video")
+                    logger.info("비디오 처리 성공")
                     
                     return {
                         "success": True,
@@ -231,11 +249,11 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                     }
 
             except Exception as e:
-                logger.error(f"Error during LatentSync processing: {str(e)}")
+                logger.error(f"LatentSync 처리 중 오류: {str(e)}")
                 return {"success": False, "error": str(e)}
 
         except Exception as e:
-            logger.error(f"Error in file handling: {str(e)}")
+            logger.error(f"파일 처리 중 오류: {str(e)}")
             return {"success": False, "error": str(e)}
 
         finally:
@@ -251,11 +269,11 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                     for file in files:
                         try:
                             os.remove(file)
-                            logger.info(f"Removed: {file}")
+                            logger.info(f"파일 삭제: {file}")
                         except Exception as e:
-                            logger.error(f"Error removing {file}: {str(e)}")
+                            logger.error(f"{file} 삭제 중 오류: {str(e)}")
                 except Exception as e:
-                    logger.error(f"Error processing pattern {pattern}: {str(e)}")
+                    logger.error(f"패턴 {pattern} 처리 중 오류: {str(e)}")
 
 
 @app.route('/', methods=['GET'])

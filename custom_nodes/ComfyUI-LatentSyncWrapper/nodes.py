@@ -295,14 +295,14 @@ class LatentSyncNode:
             package_root = os.path.dirname(cur_dir)
             if package_root not in sys.path:
                 sys.path.insert(0, package_root)
-               
+            
             # Add the current directory to Python path
             if cur_dir not in sys.path:
                 sys.path.insert(0, cur_dir)
 
             # Import the inference module
             inference_module = import_inference_script(inference_script_path)
-           
+        
             # Create a Namespace object with the arguments
             args = argparse.Namespace(
                 unet_config_path=unet_config_path,
@@ -314,19 +314,35 @@ class LatentSyncNode:
                 scheduler_config_path=scheduler_config_path,
                 whisper_ckpt_path=whisper_ckpt_path
             )
-           
+        
             # Load the config
             config = OmegaConf.load(unet_config_path)
-           
+        
             try:
                 # Call main with both config and args
                 inference_module.main(config, args)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                if "No face detected" in str(e) or "Face detection failed" in str(e):
-                    raise RuntimeError("얼굴 감지 실패: 영상에서 얼굴을 찾을 수 없습니다. 얼굴이 포함된 영상을 사용해주세요.")
+                
+                # 향상된 오류 처리
+                error_msg = str(e)
+                
+                # 얼굴 감지 관련 오류 케이스
+                face_detection_errors = [
+                    "No face detected in any frame",
+                    "얼굴 감지 실패",
+                    "비디오의 모든 프레임에서 얼굴이 감지되지 않았습니다",
+                    "expected Tensor as element"
+                ]
+                
+                if any(err in error_msg for err in face_detection_errors):
+                    print("얼굴 감지 실패: 비디오에서 충분한 얼굴이 감지되지 않았습니다.")
+                    # 이 오류는 API 핸들러에서 처리할 수 있도록 전파
+                    raise RuntimeError("얼굴 감지 실패: 영상에서 얼굴을 찾을 수 없거나 일부 프레임에만 얼굴이 있습니다.")
                 else:
+                    # 기타 예상치 못한 오류
+                    print(f"예상치 못한 오류 발생: {error_msg}")
                     raise e
 
             # Load the processed video back as frames
@@ -371,7 +387,6 @@ class LatentSyncNode:
                 processed_frames = processed_frames[..., :3]
 
             print(f"Final frame count: {processed_frames.shape[0]}")
-
             print(f"Final shape: {processed_frames.shape}")
 
             # Clean up
@@ -391,6 +406,10 @@ class LatentSyncNode:
             print(f"Error during inference: {str(e)}")
             import traceback
             traceback.print_exc()
+            
+            # For specific errors, propagate to the API handler for fallback handling
+            if "No face detected" in str(e) or "얼굴 감지 실패" in str(e):
+                raise RuntimeError(f"Face detection issue: {str(e)}")
             raise
 
         return (processed_frames, resampled_audio)

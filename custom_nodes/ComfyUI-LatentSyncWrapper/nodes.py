@@ -204,8 +204,6 @@ class LatentSyncNode:
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(temp_dir, exist_ok=True)
 
-
-
         # Create a temporary video file from the input frames
         output_name = ''.join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(5))
         temp_video_path = os.path.join(output_dir, f"temp_{output_name}.mp4")
@@ -320,8 +318,16 @@ class LatentSyncNode:
             # Load the config
             config = OmegaConf.load(unet_config_path)
            
-            # Call main with both config and args
-            inference_module.main(config, args)
+            try:
+                # Call main with both config and args
+                inference_module.main(config, args)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                if "No face detected" in str(e) or "Face detection failed" in str(e):
+                    raise RuntimeError("얼굴 감지 실패: 영상에서 얼굴을 찾을 수 없습니다. 얼굴이 포함된 영상을 사용해주세요.")
+                else:
+                    raise e
 
             # Load the processed video back as frames
             processed_frames = io.read_video(output_video_path, pts_unit='sec')[0]  # [T, H, W, C]

@@ -295,12 +295,24 @@ class LipsyncPipeline(DiffusionPipeline):
         boxes = []
         affine_matrices = []
         print(f"Affine transforming {len(video_frames)} faces...")
+        
+        face_detected = False
         for frame in tqdm.tqdm(video_frames):
-            face, box, affine_matrix = self.image_processor.affine_transform(frame)
-            faces.append(face)
-            boxes.append(box)
-            affine_matrices.append(affine_matrix)
-
+            try:
+                face, box, affine_matrix = self.image_processor.affine_transform(frame)
+                faces.append(face)
+                boxes.append(box)
+                affine_matrices.append(affine_matrix)
+                face_detected = True
+            except Exception as e:
+                if "No face detected" in str(e):
+                    continue
+                else:
+                    raise e
+        
+        if not face_detected:
+            raise ValueError("No face detected in any frame of the video. Please use a video with visible faces.")
+        
         faces = torch.stack(faces)
         return faces, video_frames, boxes, affine_matrices
 

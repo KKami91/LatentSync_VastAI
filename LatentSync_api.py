@@ -9,6 +9,9 @@ import logging
 from typing import Sequence, Mapping, Any, Union
 from flask import Flask, request, jsonify, send_file
 from io import BytesIO
+import cv2
+import numpy as np
+import subprocess
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, 
@@ -146,29 +149,52 @@ def process_latentsync(video_data: bytes, audio_data: bytes, video_name: str, cu
                         audio=get_value_at_index(loadaudio_37, 0),
                     )
 
-                    d_latentsyncnode_43 = d_latentsyncnode.inference(
-                        seed=random.randint(1, 2**32 - 1),
-                        images=get_value_at_index(d_videolengthadjuster_53, 0),
-                        audio=get_value_at_index(d_videolengthadjuster_53, 1),
-                    )
-
-                    logger.info(f"Processing video combine with filename: {output_filename}")
-                    
-                    result = vhs_videocombine.combine_video(
-                        frame_rate=25,
-                        loop_count=0,
-                        filename_prefix=output_filename,
-                        format="video/h264-mp4",
-                        pix_fmt="yuv420p",
-                        crf=19,
-                        save_metadata=True,
-                        trim_to_audio=False,
-                        pingpong=False,
-                        save_output=False,
-                        images=get_value_at_index(d_latentsyncnode_43, 0),
-                        audio=get_value_at_index(d_latentsyncnode_43, 1),
-                        unique_id=7599875590960303900,
-                    )
+                    try:
+                        # LatentSync 처리 시도
+                        d_latentsyncnode_43 = d_latentsyncnode.inference(
+                            seed=random.randint(1, 2**32 - 1),
+                            images=get_value_at_index(d_videolengthadjuster_53, 0),
+                            audio=get_value_at_index(d_videolengthadjuster_53, 1),
+                        )
+                        
+                        logger.info(f"Processing video combine with filename: {output_filename}")
+                        
+                        result = vhs_videocombine.combine_video(
+                            frame_rate=25,
+                            loop_count=0,
+                            filename_prefix=output_filename,
+                            format="video/h264-mp4",
+                            pix_fmt="yuv420p",
+                            crf=19,
+                            save_metadata=True,
+                            trim_to_audio=False,
+                            pingpong=False,
+                            save_output=False,
+                            images=get_value_at_index(d_latentsyncnode_43, 0),
+                            audio=get_value_at_index(d_latentsyncnode_43, 1),
+                            unique_id=7599875590960303900,
+                        )
+                    except Exception as e:
+                        # 얼굴 감지 실패 또는 기타 오류 발생 시 원본 영상에 음성만 추가
+                        logger.warning(f"LatentSync 처리 중 오류 발생: {str(e)}")
+                        logger.info("얼굴 감지 실패 또는 오류 발생. 원본 영상에 음성만 추가합니다.")
+                        
+                        # 원본 영상과 음성 결합
+                        result = vhs_videocombine.combine_video(
+                            frame_rate=25,
+                            loop_count=0,
+                            filename_prefix=output_filename,
+                            format="video/h264-mp4",
+                            pix_fmt="yuv420p",
+                            crf=19,
+                            save_metadata=True,
+                            trim_to_audio=False,
+                            pingpong=False,
+                            save_output=False,
+                            images=get_value_at_index(d_videolengthadjuster_53, 0),
+                            audio=get_value_at_index(d_videolengthadjuster_53, 1),
+                            unique_id=7599875590960303900,
+                        )
 
                     # 결과에서 파일 경로 가져오기
                     if isinstance(result, dict) and 'result' in result:
